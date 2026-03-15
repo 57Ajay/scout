@@ -1,0 +1,19 @@
+{$DOMAIN_NAME} {
+	reverse_proxy scout:8080
+
+	# Security headers
+	header {
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "no-referrer"
+		Cache-Control             "no-store"
+		-Server
+	}
+
+	# Access logs
+	log {
+		output stdout
+		format console
+		level  INFO
+	}
+}

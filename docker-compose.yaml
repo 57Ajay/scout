@@ -1,0 +1,57 @@
+# ═══════════════════════════════════════════════════════════════
+# Scout — secure read-only codebase explorer
+# ═══════════════════════════════════════════════════════════════
+#
+# Quick start:
+#   1. Copy .env.example -> .env and set your values
+#   2. docker compose up -d --build
+#   3. The token is printed in logs: docker compose logs scout
+#
+# Usage (Claude will call this via web_fetch):
+#   GET http://your-host:7711/api/exec?token=YOUR_TOKEN&cmd=ls%20-la&cwd=opentelemetry-collector-contrib
+#
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  scout:
+    build: .
+    container_name: scout-server
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+      - WORKSPACE=/workspace
+    volumes:
+      - ${HOST_PROJECTS:-~/Projects}:/workspace:ro
+    networks:
+      - scout-net
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: scout-caddy
+    restart: unless-stopped
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # persist TLS certs
+    networks:
+      - scout-net
+    depends_on:
+      - scout
+
+networks:
+  scout-net:
+    driver: bridge
+    internal: false
+
+volumes:
+  caddy_data:
