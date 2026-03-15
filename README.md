@@ -24,7 +24,7 @@ Scout gives Claude (or any LLM) live, read-only access to your local codebase th
 ## Quick Start
 
 ```bash
-git clone <your-repo>/scout && cd scout
+git clone https://github.com/57ajay/scout && cd scout
 cp .env.example .env
 ```
 
@@ -34,6 +34,7 @@ Edit `.env`:
 HOST_PROJECTS=~/Projects       # where your repos live on the host
 SCOUT_PORT=7711                # port exposed on localhost
 AUTH_TOKEN=                    # leave empty to auto-generate
+DOMAIN_NAME=
 ```
 
 Build and start:
