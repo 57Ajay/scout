@@ -72,7 +72,7 @@ Done. Give Claude the base URL (`http://YOUR_IP:7711`) and token.
 │  ~/Projects/                                                 │
 │  ├── opentelemetry-collector-contrib/                        │
 │  ├── opentelemetry-collector/                                │
-│  └── raahi/                                                  │
+│  └── scout/                                                  │
 │       │                                                      │
 │       │ mounted read-only (:ro)                              │
 │       ▼                                                      │
@@ -80,7 +80,7 @@ Done. Give Claude the base URL (`http://YOUR_IP:7711`) and token.
 │  │                                                         │ │
 │  │  scout-server (:8080)                                   │ │
 │  │  ├── Parses command string (no shell)                   │ │
-│  │  ├── Validates every command against allowlist           │ │
+│  │  ├── Validates every command against allowlist          │ │
 │  │  ├── Validates every pipe segment independently         │ │
 │  │  ├── Executes via os/exec (direct syscall, no sh -c)    │ │
 │  │  └── Returns JSON result                                │ │
@@ -92,9 +92,9 @@ Done. Give Claude the base URL (`http://YOUR_IP:7711`) and token.
 │  │                                                         │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │       │                                                      │
-│       │ http://localhost:7711                                 │
+│       │ http://localhost:7711                                │
 │       ▼                                                      │
-│  Claude (via web_fetch)                                      │
+│  Claude (via web_fetch or curl)                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
