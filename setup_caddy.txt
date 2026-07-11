@@ -1,0 +1,27 @@
+# 1. Your public IP → your domain becomes <IP>.nip.io (no DNS setup needed)
+curl -4 ifconfig.me
+
+# 2. Open 80 + 443 (also open them in your cloud provider's security group!)
+sudo ufw allow 80,443/tcp
+
+# 3. Install Caddy (official repo)
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+
+sudo apt update && sudo apt install -y caddy
+
+# 4. Point Caddy at Scout (replace 1.2.3.4 with your IP from step 1)
+sudo tee /etc/caddy/Caddyfile >/dev/null <<'EOF'
+1.2.3.4.nip.io {
+    reverse_proxy 127.0.0.1:7711 {
+        flush_interval -1
+    }
+}
+EOF
+sudo systemctl reload caddy
+
+# 5. Test (give it ~15s the first time to fetch the cert)
+curl https://1.2.3.4.nip.io/api/health
