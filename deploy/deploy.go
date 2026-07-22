@@ -237,7 +237,7 @@ func main() {
 		log.Println("\n  ┌────────────────────────────────────────────────────────────")
 		log.Printf("  │ AUTH TOKEN: %s\n", finalToken)
 		log.Println("  │ Share this token and URL with your AI agent.")
-		log.Println("  └────────────────────────────────────────────────────────────\n")
+		log.Println("  └────────────────────────────────────────────────────────────")
 	}
 }
 
