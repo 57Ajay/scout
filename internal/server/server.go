@@ -69,14 +69,12 @@ func New(cfg config.Config) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Public — no auth.
-	mux.HandleFunc("GET /api/health", s.mwLog(s.handleHealth))
-
 	// Protected API.
 	protected := func(h http.HandlerFunc) http.HandlerFunc {
 		return s.mwLog(s.mwRateLimit(s.mwIPAllow(s.mwAuth(h))))
 	}
 
+	mux.HandleFunc("GET /api/health", protected(s.handleHealth))
 	mux.HandleFunc("GET /api/help", protected(s.handleHelp))
 	mux.HandleFunc("GET /api/policy", protected(s.handlePolicy))
 	mux.HandleFunc("GET /api/audit", protected(s.handleAudit))
@@ -103,7 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/approvals/{id}/deny", protected(s.handleApprovalDeny))
 
 	// Dashboard (auth via ?token=).
-	mux.HandleFunc("GET /", s.mwLog(s.mwIPAllow(s.handleDashboard)))
+	mux.HandleFunc("GET /", protected(s.handleDashboard))
 
 	return mux
 }

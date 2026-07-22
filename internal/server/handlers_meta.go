@@ -42,9 +42,9 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 var helpDoc = map[string]any{
 	"service": "scout",
 	"summary": "Remote VM control plane for AI agents. Full shell, file ops, background processes, and streaming, with a human-approval gate for dangerous commands.",
-	"auth":    "Send token as ?token=... or 'Authorization: Bearer ...' on every call except /api/health.",
+	"auth":    "Send token as ?token=... or 'Authorization: Bearer ...' on every call.",
 	"endpoints": map[string]any{
-		"GET  /api/health":                 "Liveness. No auth.",
+		"GET  /api/health":                 "Liveness. Authenticated.",
 		"GET  /api/help":                   "This document.",
 		"GET  /api/policy":                 "Current policy: default action, rule counts, protected paths, roots, shell.",
 		"GET  /api/audit?n=100":            "Recent audited operations.",
