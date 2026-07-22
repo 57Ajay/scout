@@ -70,7 +70,7 @@ git clone https://github.com/57ajay/scout && cd scout
 
 # One-shot install: builds the binary, writes /etc/scout/scout.yaml with a
 # strong random token, and starts a systemd service running as your user.
-sudo ./deploy/install.sh
+sudo go run deploy/deploy.go
 ```
 
 The installer prints your token. Verify:
@@ -455,7 +455,7 @@ Set `approvals.notify_webhook` (or `SCOUT_NOTIFY_WEBHOOK`) to get a JSON POST wh
 
 ### Native (systemd)
 
-`sudo ./deploy/install.sh` builds the binary, writes `/etc/scout/scout.yaml` with a random token, and installs a service running as your user. Then:
+`sudo go run deploy/deploy.go` builds the binary, writes `/etc/scout/scout.yaml` with a random token, and installs a service running as your user (and optionally configures Caddy reverse proxy if `DOMAIN_NAME` is defined in `.env`). Then:
 
 ```bash
 systemctl status scout
