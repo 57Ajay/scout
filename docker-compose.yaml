@@ -1,57 +1,77 @@
 # ═══════════════════════════════════════════════════════════════
-# Scout — secure read-only codebase explorer
+# Scout — remote VM control plane for AI agents (container option)
 # ═══════════════════════════════════════════════════════════════
 #
-# Quick start:
-#   1. Copy .env.example -> .env and set your values
+#   1. cp .env.example .env   and set AUTH_TOKEN + HOST_MOUNT
 #   2. docker compose up -d --build
-#   3. The token is printed in logs: docker compose logs scout
+#   3. Point your AI at http://YOUR_HOST:${SCOUT_PORT}  with the token
 #
-# Usage (Claude will call this via web_fetch):
-#   GET http://your-host:7711/api/exec?token=YOUR_TOKEN&cmd=ls%20-la&cwd=opentelemetry-collector-contrib
-#
+# ⚠️  This container is POWERFUL by design. With the Docker socket mounted it
+#     has root-equivalent control of the host. Restrict access with a strong
+#     token, filesystem.roots, allowed_ips, and TLS. For a lighter blast radius
+#     prefer the native systemd install (see deploy/) or drop the socket mount.
 # ═══════════════════════════════════════════════════════════════
 
 services:
   scout:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: "2.0.0"
     container_name: scout-server
     restart: unless-stopped
+    ports:
+      # Direct access on the host. Put behind the caddy/tls profile or a
+      # firewall for anything internet-facing.
+      - "${SCOUT_PORT:-7711}:8080"
     environment:
-      - PORT=8080
-      - AUTH_TOKEN=${AUTH_TOKEN:-}
-      - WORKSPACE=/workspace
+      - SCOUT_PORT=8080
+      - SCOUT_TOKENS=${AUTH_TOKEN:-}
+      - SCOUT_WORKING_DIR=/work
+      # Confine file endpoints + cwd to the mount. Remove to allow the whole
+      # container filesystem.
+      - SCOUT_ROOTS=/work
+      # - SCOUT_ALLOWED_IPS=10.0.0.0/8
+      # - SCOUT_AUDIT_FILE=/work/.scout-audit.log
+      # - SCOUT_NOTIFY_WEBHOOK=${NOTIFY_WEBHOOK:-}
     volumes:
-      - ${HOST_PROJECTS:-~/Projects}:/workspace:ro
-    networks:
-      - scout-net
+      # Your project(s), mounted READ-WRITE so the agent can edit + build.
+      - ${HOST_MOUNT:-./work}:/work
+      # Docker control (host engine). Comment out to deny container/image ops.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Kubernetes control (optional). Point KUBECONFIG_FILE at your kubeconfig.
+      - ${KUBECONFIG_FILE:-/dev/null}:/root/.kube/config:ro
+      # Optional config file (uncomment and provide ./scout.yaml).
+      # - ./scout.yaml:/etc/scout/scout.yaml:ro
+    # command: ["--config", "/etc/scout/scout.yaml"]
+    networks: [scout-net]
     security_opt:
       - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:size=64m
 
+  # Optional TLS reverse proxy. Set DOMAIN_NAME in .env and enable the profile:
+  #   docker compose --profile tls up -d
   caddy:
     image: caddy:2-alpine
     container_name: scout-caddy
     restart: unless-stopped
+    profiles: ["tls"]
     environment:
-      - DOMAIN_NAME=${DOMAIN_NAME}
+      - DOMAIN_NAME=${DOMAIN_NAME:-}
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data        # persist TLS certs
-    networks:
-      - scout-net
-    depends_on:
-      - scout
+      - caddy_data:/data
+    networks: [scout-net]
+    depends_on: [scout]
+
+  # Without TLS, expose Scout directly on the host port.
+  # (Remove this block if you use the caddy/tls profile.)
 
 networks:
   scout-net:
     driver: bridge
-    internal: false
 
 volumes:
   caddy_data:

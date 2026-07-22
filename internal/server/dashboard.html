@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout Control</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3;
+    --muted:#8b949e; --accent:#58a6ff; --green:#3fb950; --red:#f85149;
+    --amber:#d29922; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px}
+  header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;position:sticky;top:0;background:var(--bg);z-index:10}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.3px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px}
+  .grid{display:grid;grid-template-columns:1fr;gap:20px}
+  @media(min-width:880px){.grid{grid-template-columns:1fr 1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:0;padding:14px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+  .badge{background:#21262d;color:var(--text);border-radius:20px;padding:2px 9px;font-size:12px;font-weight:600}
+  .badge.hot{background:var(--amber);color:#000}
+  .body{padding:12px 16px;max-height:440px;overflow:auto}
+  .empty{color:var(--muted);padding:18px 4px;text-align:center}
+  .appr{border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px;background:#0d1117}
+  .appr .reason{color:var(--amber);font-size:12px;margin-bottom:6px}
+  .cmd{font-family:var(--mono);font-size:12.5px;background:#010409;border:1px solid var(--border);border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;color:#e6edf3}
+  .meta{color:var(--muted);font-size:11.5px;margin-top:6px;display:flex;gap:12px;flex-wrap:wrap}
+  .actions{margin-top:10px;display:flex;gap:8px}
+  button{border:1px solid var(--border);background:#21262d;color:var(--text);padding:7px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600}
+  button:hover{border-color:var(--muted)}
+  button.approve{background:var(--green);color:#03110a;border-color:transparent}
+  button.deny{background:var(--red);color:#1a0303;border-color:transparent}
+  button.small{padding:4px 10px;font-size:12px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+  .st{font-family:var(--mono);font-size:11px;padding:1px 7px;border-radius:10px;background:#21262d}
+  .st.running{color:var(--green)} .st.allow{color:var(--green)} .st.ran{color:var(--green)}
+  .st.deny,.st.blocked,.st.denied{color:var(--red)} .st.pending,.st.ask{color:var(--amber)}
+  .mono{font-family:var(--mono)}
+  .foot{color:var(--muted);font-size:11.5px;text-align:center;margin-top:22px}
+  a{color:var(--accent);text-decoration:none}
+  .tok-warn{background:var(--red);color:#fff;padding:10px 16px;text-align:center;font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>SCOUT &middot; VM Control</h1>
+  <span class="badge" id="policy" style="margin-left:auto">policy&hellip;</span>
+</header>
+<div id="tokwarn" class="tok-warn" style="display:none">No ?token= in the URL. Append <span class="mono">?token=YOUR_TOKEN</span> to use the dashboard.</div>
+<div class="wrap">
+  <div class="grid">
+    <div class="card" style="grid-column:1/-1">
+      <h2>Pending Approvals <span class="badge hot" id="pcount">0</span></h2>
+      <div class="body" id="approvals"><div class="empty">Loading&hellip;</div></div>
+    </div>
+    <div class="card">
+      <h2>Background Processes <span class="badge" id="proccount">0</span></h2>
+      <div class="body" id="procs"><div class="empty">Loading&hellip;</div></div>
+    </div>
+    <div class="card">
+      <h2>Recent Activity</h2>
+      <div class="body" id="audit"><div class="empty">Loading&hellip;</div></div>
+    </div>
+  </div>
+  <div class="foot">Scout &middot; auto-refreshing every 2s &middot; <a href="/api/help" id="helplink">API help</a></div>
+</div>
+<script>
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+if(!TOKEN){ document.getElementById('tokwarn').style.display='block'; }
+document.getElementById('helplink').href = '/api/help?token='+encodeURIComponent(TOKEN);
+async function api(path, opts){
+  const sep = path.includes('?') ? '&' : '?';
+  const url = path + sep + 'token=' + encodeURIComponent(TOKEN);
+  const r = await fetch(url, Object.assign({headers:{'Authorization':'Bearer '+TOKEN}}, opts||{}));
+  return r.json();
+}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function ago(t){ if(!t) return ''; const d=(Date.now()-new Date(t).getTime())/1000; if(d<60)return Math.floor(d)+'s ago'; if(d<3600)return Math.floor(d/60)+'m ago'; return Math.floor(d/3600)+'h ago';}
+
+async function decide(id, action){
+  await api('/api/approvals/'+id+'/'+action, {method:'POST'});
+  refresh();
+}
+async function stopProc(id){ await api('/api/proc/'+id+'/stop',{method:'POST'}); refreshProcs(); }
+
+async function refreshApprovals(){
+  try{
+    const d = await api('/api/approvals?status=pending');
+    const list = d.approvals||[];
+    document.getElementById('pcount').textContent = list.length;
+    const el = document.getElementById('approvals');
+    if(!list.length){ el.innerHTML='<div class="empty">Nothing waiting. The agent is running freely within policy.</div>'; return; }
+    el.innerHTML = list.map(a=>`
+      <div class="appr">
+        <div class="reason">&#9888; ${esc(a.reason)}</div>
+        <div class="cmd">${esc(a.command || (a.params&&a.params.path) || a.kind)}</div>
+        <div class="meta">
+          <span>kind: ${esc(a.kind)}</span>
+          ${a.cwd?`<span>cwd: <span class="mono">${esc(a.cwd)}</span></span>`:''}
+          <span>from: ${esc(a.source_ip||'?')}</span>
+          <span>${ago(a.created_at)}</span>
+        </div>
+        <div class="actions">
+          <button class="approve" onclick="decide('${a.id}','approve')">Approve &amp; run</button>
+          <button class="deny" onclick="decide('${a.id}','deny')">Deny</button>
+        </div>
+      </div>`).join('');
+  }catch(e){ document.getElementById('dot').style.background='var(--red)'; }
+}
+async function refreshProcs(){
+  try{
+    const d = await api('/api/proc');
+    const list = d.processes||[];
+    document.getElementById('proccount').textContent = list.length;
+    const el = document.getElementById('procs');
+    if(!list.length){ el.innerHTML='<div class="empty">No background processes.</div>'; return; }
+    el.innerHTML = '<table><tr><th>Command</th><th>Status</th><th></th></tr>'+list.map(p=>`
+      <tr>
+        <td class="mono">${esc(p.command)}<div class="meta">${esc(p.id)} &middot; pid ${p.pid||'-'}</div></td>
+        <td><span class="st ${esc(p.status)}">${esc(p.status)}${p.exit_code!=null?(' ('+p.exit_code+')'):''}</span></td>
+        <td>${p.status==='running'?`<button class="small deny" onclick="stopProc('${p.id}')">Stop</button>`:''}</td>
+      </tr>`).join('')+'</table>';
+  }catch(e){}
+}
+async function refreshAudit(){
+  try{
+    const d = await api('/api/audit?n=40');
+    const list = d.entries||[];
+    const el = document.getElementById('audit');
+    if(!list.length){ el.innerHTML='<div class="empty">No activity yet.</div>'; return; }
+    el.innerHTML = '<table><tr><th>When</th><th>Op</th><th>Detail</th><th>Result</th></tr>'+list.map(e=>`
+      <tr>
+        <td>${ago(e.time)}</td>
+        <td class="mono">${esc(e.kind)}</td>
+        <td class="mono">${esc((e.command||'').slice(0,70))}</td>
+        <td><span class="st ${esc(e.decision||e.status)}">${esc(e.status||e.decision||'')}</span></td>
+      </tr>`).join('')+'</table>';
+  }catch(e){}
+}
+async function refreshPolicy(){
+  try{
+    const d = await api('/api/policy');
+    document.getElementById('policy').textContent = 'default: '+d.default+' &middot; '+(d.builtin_rules||0)+' guards';
+  }catch(e){}
+}
+function refresh(){ refreshApprovals(); refreshProcs(); refreshAudit(); }
+refreshPolicy(); refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

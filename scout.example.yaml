@@ -1,0 +1,53 @@
+# scout.yaml — Scout configuration (all fields optional; these are the defaults)
+server:
+  bind: "0.0.0.0"
+  port: "7711"
+  # tls_cert: /etc/scout/cert.pem
+  # tls_key:  /etc/scout/key.pem
+
+auth:
+  # Bearer tokens accepted by the API. If empty, one is generated at startup.
+  tokens:
+    - "for_claude"
+  # Optional: restrict callers to these IPs/CIDRs.
+  # allowed_ips: ["10.0.0.0/8", "203.0.113.7"]
+
+policy:
+  # Fallthrough action for commands no rule matches: allow | ask | deny
+  default: allow
+  # Keep the built-in dangerous-command guard (routes destructive ops to a human)
+  use_builtin_dangerous: true
+  # Your own overrides — first match wins, evaluated before the built-ins.
+  rules:
+    # - { pattern: "^git\\s+push",       action: allow, reason: "pushing is fine here" }
+    # - { pattern: "\\bterraform\\b",    action: ask,   reason: "review infra changes" }
+    # - { pattern: "\\bdocker\\s+login", action: deny,  reason: "no registry logins" }
+  # Touching any of these escalates to human approval.
+  protected_paths:
+    - "**/.ssh/**"
+    - "**/.aws/**"
+    - "**/.env"
+    - "**/*.pem"
+
+filesystem:
+  # Confine file endpoints + cwd. ["/"] means the whole VM. Narrow to sandbox.
+  roots: ["/"]
+
+limits:
+  timeout: 5m
+  max_output_bytes: 10485760 # 10 MB
+  rate_limit: 240 # requests/minute (0 = unlimited)
+  max_request_bytes: 134217728 # 128 MB
+
+approvals:
+  wait_timeout: 90s # how long exec?wait=true blocks for a decision
+  ttl: 1h # how long a pending approval lives
+  # notify_webhook: "https://hooks.slack.com/services/…"  # POSTed on new approval
+
+audit:
+  # file: /var/log/scout/audit.log   # JSONL audit trail ("" disables file)
+  max_memory: 500
+
+exec:
+  shell: ["/bin/bash", "-lc"]
+  # working_dir: /home/you        # default cwd (defaults to $HOME)

@@ -1,685 +1,519 @@
 # Scout
 
-**Secure, read-only codebase explorer for AI-assisted development.**
+**A remote VM control plane for AI agents.** Give an AI model one URL and a token, and it can drive your machine the way you would — read and write files, run any shell command, use git, Docker, and Kubernetes, start long-running processes, and stream large output back in real time. Dangerous commands are gated: Scout pauses them and asks a human to approve or deny, from a built-in web dashboard.
 
-Scout gives Claude (or any LLM) live, read-only access to your local codebase through a simple HTTP API. Instead of copy-pasting files into chat or fighting GitHub's rate limits, you start Scout once, hand Claude the endpoint URL and auth token, and it can browse your project structure, read files, search code, check git history — all without being able to modify a single byte.
+Scout used to be a read-only codebase explorer. It is now a full control plane. Everything runs through a single Go binary with **zero third-party dependencies** — build it once, drop it on a VM, and point any agent at it.
+
+```
+   AI agent  ──HTTP──▶  Scout  ──▶  bash · files · git · docker · kubectl
+                          │
+                          └─ dangerous command?  ─▶  human approves in dashboard
+```
 
 ---
 
-## Table of Contents
+## Table of contents
 
-- [Quick Start](#quick-start)
-- [How It Works](#how-it-works)
-- [Configuration](#configuration)
-- [API Reference](#api-reference)
-- [Claude Integration Guide](#claude-integration-guide)
-- [Command Reference](#command-reference)
-- [Pipes](#pipes)
-- [Security Model](#security-model)
-- [Real-World Workflow Examples](#real-world-workflow-examples)
+- [Why Scout](#why-scout)
+- [Security model at a glance](#security-model-at-a-glance)
+- [Quick start (native)](#quick-start-native)
+- [Quick start (Docker)](#quick-start-docker)
+- [Core concepts](#core-concepts)
+- [🤖 The agent playbook](#-the-agent-playbook) — *hand this to your AI*
+- [API reference](#api-reference)
+- [Policy & privacy](#policy--privacy)
+- [Configuration reference](#configuration-reference)
+- [Deployment](#deployment)
+- [Architecture](#architecture)
 - [Troubleshooting](#troubleshooting)
 
 ---
 
-## Quick Start
+## Why Scout
+
+An AI coding agent is only as useful as its reach. Copy-pasting files into a chat, or giving it read-only access, means it can *suggest* but not *do*. Scout closes that gap safely:
+
+- **Full shell.** Commands run through `bash -lc`, so pipes, redirects, `&&`, subshells, environment variables, and every CLI you have installed just work.
+- **Structured file ops.** Dedicated read / write / edit / list / stat endpoints avoid shell-quoting bugs and stream large files in chunks.
+- **Live processes.** Start a dev server or a log tail in the background, stream its output, stop it later.
+- **Streaming.** Long commands and big files stream back as newline-delimited JSON instead of arriving all at once.
+- **Human-in-the-loop.** Default-allow, but destructive commands (`rm -rf`, `git push --force`, `kubectl delete`, `docker system prune`, `sudo`, …) are parked for a human to approve.
+- **Configurable.** Flip to a paranoid "approve everything" mode, or a locked "allowlist only" mode, or add your own allow/ask/deny rules.
+
+---
+
+## Security model at a glance
+
+Scout is powerful by design. Treat the token like a root password and read this section before exposing it.
+
+| Layer | What it does |
+|---|---|
+| **Auth token** | Every endpoint except `/api/health` needs a bearer token (constant-time compared). |
+| **Policy engine** | Default-allow, but a built-in denylist routes ~50 dangerous command patterns to human approval. Fully configurable. |
+| **Protected paths** | Touching `.ssh`, `.env`, `*.pem`, `/etc/shadow`, etc. escalates to approval — even for reads. |
+| **Filesystem roots** | Confine all file endpoints and working directories to specific directories. |
+| **IP allowlist** | Optionally restrict callers to specific IPs / CIDRs. |
+| **Audit log** | Every command, decision, and approval is recorded (JSONL + in-memory), tokens redacted. |
+| **Rate limiting** | Sliding-window request cap. |
+| **TLS** | First-class via the bundled Caddy reverse proxy, or Scout's own `tls_cert`/`tls_key`. |
+
+> ⚠️ With `filesystem.roots: ["/"]` (the default) and default-allow policy, an approved agent can do anything you can. For sensitive machines: narrow `filesystem.roots`, set `allowed_ips`, use a strong token over TLS, and consider `policy.default: ask`.
+
+---
+
+## Quick start (native)
+
+The most capable setup — Scout runs as *you*, with your real access to files, Docker, and Kubernetes.
+
+```bash
+git clone https://github.com/57ajay/scout && cd scout
+
+# One-shot install: builds the binary, writes /etc/scout/scout.yaml with a
+# strong random token, and starts a systemd service running as your user.
+sudo go run deploy/deploy.go
+```
+
+The installer prints your token. Verify:
+
+```bash
+curl http://127.0.0.1:7711/api/health
+curl "http://127.0.0.1:7711/api/exec?token=YOUR_TOKEN&cmd=uname%20-a"
+```
+
+Open the dashboard at `http://YOUR_HOST:7711/?token=YOUR_TOKEN`, then hand the base URL + token to your AI.
+
+**Manual build** (no systemd):
+
+```bash
+go build -o scout .
+./scout --gen-config > scout.yaml    # edit it: set a token
+./scout --config scout.yaml
+```
+
+Scout needs Go 1.23+ to build. It has no dependencies, so the build works offline.
+
+---
+
+## Quick start (Docker)
+
+A containerized control plane with the Docker CLI and `kubectl` baked in.
 
 ```bash
 git clone https://github.com/57ajay/scout && cd scout
 cp .env.example .env
-```
+# edit .env: set AUTH_TOKEN (openssl rand -hex 24) and HOST_MOUNT=/path/to/projects
 
-Edit `.env`:
-
-```env
-HOST_PROJECTS=~/Projects       # where your repos live on the host
-SCOUT_PORT=7711                # port exposed on localhost
-AUTH_TOKEN=                    # leave empty to auto-generate
-DOMAIN_NAME=
-```
-
-Build and start:
-
-```bash
 docker compose up -d --build
+curl "http://localhost:7711/api/exec?token=YOUR_TOKEN&cmd=ls%20-la"
 ```
 
-Grab the auth token from logs (only needed if you left `AUTH_TOKEN` empty):
+The compose file mounts your `HOST_MOUNT` read-write at `/work`, plus the host Docker socket and (optionally) your kubeconfig, so the agent can build images and drive your cluster. For TLS, set `DOMAIN_NAME` and run `docker compose --profile tls up -d`.
 
-```bash
-docker compose logs scout | grep "Generated auth token"
-```
-
-Verify it's running:
-
-```bash
-curl "http://localhost:7711/api/health"
-# {"status":"ok","workspace":"/workspace","time":"..."}
-
-curl "http://localhost:7711/api/exec?token=YOUR_TOKEN&cmd=ls"
-# Lists all projects in your workspace
-```
-
-Done. Give Claude the base URL (`http://YOUR_IP:7711`) and token.
+> The Docker option with the socket mounted is root-equivalent on the host. For a smaller blast radius, prefer the native install or comment out the `docker.sock` volume.
 
 ---
 
-## How It Works
+## Core concepts
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Your Machine                                                │
-│                                                              │
-│  ~/Projects/                                                 │
-│  ├── opentelemetry-collector-contrib/                        │
-│  ├── opentelemetry-collector/                                │
-│  └── scout/                                                  │
-│       │                                                      │
-│       │ mounted read-only (:ro)                              │
-│       ▼                                                      │
-│  ┌─────────────────────────── Docker ──────────────────────┐ │
-│  │                                                         │ │
-│  │  scout-server (:8080)                                   │ │
-│  │  ├── Parses command string (no shell)                   │ │
-│  │  ├── Validates every command against allowlist          │ │
-│  │  ├── Validates every pipe segment independently         │ │
-│  │  ├── Executes via os/exec (direct syscall, no sh -c)    │ │
-│  │  └── Returns JSON result                                │ │
-│  │       │                                                 │ │
-│  │       │ internal docker network                         │ │
-│  │       ▼                                                 │ │
-│  │  scout-caddy (:80 → host :7711)                         │ │
-│  │  └── Reverse proxy + security headers                   │ │
-│  │                                                         │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│       │                                                      │
-│       │ http://localhost:7711                                │
-│       ▼                                                      │
-│  Claude (via web_fetch or curl)                              │
-└──────────────────────────────────────────────────────────────┘
-```
+### The policy decision
 
-Key principle: **your filesystem is mounted read-only, the container itself is read-only, and every command is validated against a hardcoded allowlist before execution.** There is no shell involved at any point — commands are tokenized in Go and executed via direct syscalls.
+Every command gets one of three verdicts:
+
+- **allow** — runs immediately.
+- **ask** — parked for a human; the agent gets an `approval_id` to poll (or waits inline).
+- **deny** — rejected outright.
+
+The default is **allow**, with a built-in guard that turns destructive commands into **ask**. You can add rules, change the default, or turn the guard off. See [Policy & privacy](#policy--privacy).
+
+### Approvals
+
+When a command is parked, Scout returns HTTP `202` with an `approval_id`. A human resolves it in the dashboard (`/?token=…`) or via the API. On approval the command **executes server-side** and the result is attached to the approval record — so whether the agent waited inline or polls later, it gets the output. Pending approvals expire after `approvals.ttl`.
+
+By default exec/fs calls **wait inline** (`wait=true`) up to `approvals.wait_timeout`, so a quick human approval returns the result in the same request. Pass `wait=false` to get the pending handle immediately and poll.
+
+### Streaming
+
+Add `stream=true` to `/api/exec` (or `/api/fs/read`) and Scout streams output as it is produced:
+
+- `/api/exec?...&stream=true` → **newline-delimited JSON** events: one `meta`, many `stdout`/`stderr`, one `exit`.
+- `/api/fs/read?...&stream=true` → the raw file, chunked.
+
+Use this for commands that take a while or produce megabytes, and for reading large files without buffering them whole.
+
+### Sessions
+
+Pass a stable `session` string across exec calls to persist the working directory and environment variables between commands — a lightweight substitute for an interactive shell.
 
 ---
 
-## Configuration
+## 🤖 The agent playbook
 
-All configuration is via environment variables in `.env` (or set directly in `docker-compose.yml`).
+**This section is written for the AI.** If you are an assistant that has been handed a Scout `BASE_URL` and `TOKEN`, this is how to use it to its fullest.
 
-| Variable | Default | Description |
-|---|---|---|
-| `HOST_PROJECTS` | `~/Projects` | Path on your host machine to mount as the workspace. This is what Scout can see. |
-| `SCOUT_PORT` | `7711` | Port exposed on the host (Caddy listens here). |
-| `AUTH_TOKEN` | *(auto-generated)* | Bearer token for API access. If empty, a random 48-char hex token is generated on startup and printed to logs. |
+### Golden rules
 
-Internal (set in `docker-compose.yml`, rarely need changing):
+1. **You are driving a real machine.** Files you write persist. Commands you run have effects. Prefer reversible steps and check your work (`git status`, `git diff`, re-read files after writing).
+2. **Send the token on every call** as `?token=TOKEN` or header `Authorization: Bearer TOKEN`. Only `/api/health` is unauthenticated.
+3. **Prefer the file endpoints over shell redirection** for reading and writing — they avoid quoting bugs and stream large content.
+4. **When you get `202 pending_approval`, a human must approve.** Poll `GET /api/approvals/{id}` until `status != "pending"`. Don't retry the command — it's already queued.
+5. **Stream anything big.** For a 5,000-line file or a slow build, use `stream=true` instead of pulling it all at once.
 
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `8080` | Internal port the Go server listens on (inside Docker). |
-| `WORKSPACE` | `/workspace` | Mount point inside the container. Must match the volume target. |
+### Recipes
 
-Hardcoded defaults in `main.go` (edit source to change):
+**Run a command**
 
-| Setting | Value |
+```
+GET  {BASE_URL}/api/exec?token=TOKEN&cmd=<url-encoded command>
+POST {BASE_URL}/api/exec     {"command": "...", "cwd": "...", "env": {...}}
+```
+
+```bash
+curl -G "$BASE/api/exec" --data-urlencode "token=$T" \
+     --data-urlencode "cmd=cd myrepo && npm run build"
+```
+
+Response: `{ ok, stdout, stderr, exit_code, cwd, duration_ms }`. `ok` is true only when `exit_code == 0`.
+
+**Read a file (whole, a line range, or streamed)**
+
+```bash
+# whole file
+curl -G "$BASE/api/fs/read" --data-urlencode "token=$T" --data-urlencode "path=src/main.go"
+# lines 100–200 only
+curl -G "$BASE/api/fs/read" --data-urlencode "token=$T" --data-urlencode "path=src/main.go" \
+     --data-urlencode "start=100" --data-urlencode "end=200"
+# stream a huge file
+curl -N -G "$BASE/api/fs/read" --data-urlencode "token=$T" --data-urlencode "path=big.log" \
+     --data-urlencode "stream=true"
+```
+
+Binary files come back base64-encoded (`encoding: "base64"`).
+
+**Write a file**
+
+```bash
+curl -X POST "$BASE/api/fs/write?token=$T" -H 'Content-Type: application/json' -d '{
+  "path": "src/new.go",
+  "content": "package main\n\nfunc main() {}\n",
+  "mode": "overwrite",          // or "append", or "create" (fail if exists)
+  "mkdirs": true
+}'
+```
+
+For binary content set `"base64": true` and send base64 in `content`.
+
+**Edit a file (surgical search/replace)**
+
+```bash
+curl -X POST "$BASE/api/fs/edit?token=$T" -H 'Content-Type: application/json' -d '{
+  "path": "config.yaml",
+  "edits": [
+    { "old": "port: 8080", "new": "port: 9090" },
+    { "old": "  debug: false", "new": "  debug: true", "replace_all": false }
+  ]
+}'
+```
+
+A non-`replace_all` edit requires its `old` string to be **unique** in the file (0 or >1 matches is an error) — include surrounding context to disambiguate, exactly like a careful human editor.
+
+**Explore the filesystem**
+
+```bash
+curl -G "$BASE/api/fs/list" --data-urlencode "token=$T" --data-urlencode "path=." \
+     --data-urlencode "recursive=true" --data-urlencode "depth=2"
+curl -G "$BASE/api/fs/stat" --data-urlencode "token=$T" --data-urlencode "path=go.mod"
+```
+
+**Stream a long command**
+
+```bash
+curl -N -G "$BASE/api/exec" --data-urlencode "token=$T" --data-urlencode "stream=true" \
+     --data-urlencode "cmd=go test ./... -v"
+# → {"type":"meta",...}
+#   {"type":"stdout","data":"=== RUN   TestFoo\n"}
+#   ...
+#   {"type":"exit","exit_code":0,"duration_ms":8123}
+```
+
+**Run something in the background** (dev servers, watchers, port-forwards)
+
+```bash
+# start
+curl -X POST "$BASE/api/proc/start?token=$T" -H 'Content-Type: application/json' \
+     -d '{"command":"npm run dev","cwd":"myapp"}'          # → {"process":{"id":"proc_…"}}
+# tail its output (offset-based; pass the returned offset next time)
+curl -G "$BASE/api/proc/proc_XXXX/logs" --data-urlencode "token=$T"
+# or stream it live
+curl -N "$BASE/api/proc/proc_XXXX/logs?token=$T&stream=true"
+# stop it
+curl -X POST "$BASE/api/proc/proc_XXXX/stop?token=$T"
+```
+
+**Handle an approval**
+
+```bash
+# A dangerous command returns 202:
+curl -G "$BASE/api/exec" --data-urlencode "token=$T" --data-urlencode "cmd=rm -rf build" \
+     --data-urlencode "wait=false"
+# → {"status":"pending_approval","approval_id":"ap_123","reason":"recursive force delete (rm -rf)"}
+
+# Poll until resolved:
+curl "$BASE/api/approvals/ap_123?token=$T"
+# → status: "pending" → keep polling
+# → status: "completed" → read approval.result.stdout / exit_code
+# → status: "denied"    → the human said no; do not retry, ask them why
+```
+
+If you'd rather block, omit `wait` (defaults to true): the call holds until the human decides or the wait window elapses, then returns the result or a pending handle.
+
+**Keep a working directory across calls**
+
+```bash
+curl -G "$BASE/api/exec" --data-urlencode "token=$T" --data-urlencode "session=job1" \
+     --data-urlencode "cwd=/home/me/project" --data-urlencode "cmd=pwd"
+# later calls with session=job1 default to that cwd and remember env vars
+```
+
+### A ready-made instruction block
+
+You can paste this into an agent's system prompt:
+
+> You have a tool called **Scout** at `BASE_URL` with token `TOKEN`. It lets you control a Linux machine over HTTP. Send the token on every request. Use `GET/POST {BASE_URL}/api/exec` to run shell commands (`cmd` or JSON `command`), and the `/api/fs/*` endpoints to read, write, and edit files. Start long-running processes with `/api/proc/start` and stream big output or slow commands with `stream=true`. Most commands run immediately; destructive ones return `202 pending_approval` with an `approval_id` — a human must approve them, so poll `GET {BASE_URL}/api/approvals/{id}` until the status changes, then use the attached result. Read `GET {BASE_URL}/api/help` for the full API. Work carefully: your changes are real and persistent.
+
+---
+
+## API reference
+
+All responses are JSON unless streaming. Auth is required on every endpoint except `/api/health`, via `?token=` or `Authorization: Bearer`.
+
+### Meta
+
+| Endpoint | Description |
 |---|---|
-| Max output size | 2 MB |
-| Command timeout | 30 seconds |
-| Rate limit | 60 requests/minute |
+| `GET /api/health` | Liveness. No auth. |
+| `GET /api/help` | Machine-readable API guide (for agents). |
+| `GET /api/policy` | Current policy: default action, rule counts, protected paths, roots, shell. |
+| `GET /api/audit?n=100` | Recent audited operations. |
+
+### Exec
+
+`GET`/`POST /api/exec`
+
+| Param | Where | Description |
+|---|---|---|
+| `cmd` / `command` | query / body | The shell command (required). |
+| `cwd` | query / body | Working directory (absolute, or relative to `working_dir`). |
+| `env` | body | `{ "KEY": "value" }` environment overrides. |
+| `timeout` | query / body | e.g. `30s`, `5m`. Defaults to `limits.timeout`. |
+| `stream` | query / body | `true` → NDJSON event stream. |
+| `wait` | query / body | For dangerous commands: `true` (default) blocks for approval; `false` returns a pending handle. |
+| `session` | query / body | Persist cwd + env across calls. |
+
+Buffered result: `{ ok, stdout, stderr, exit_code, cwd, command, duration_ms, timed_out, truncated_stdout }`.
+Stream events: `{type:"meta",cwd,command}`, `{type:"stdout"|"stderr",data}`, `{type:"exit",exit_code,duration_ms,timed_out}`.
+
+### Filesystem
+
+| Endpoint | Body / params | Description |
+|---|---|---|
+| `GET /api/fs/read` | `path`, `start`, `end`, `stream` | Read a file or line range; stream large ones. |
+| `POST /api/fs/write` | `path`, `content`, `mode`, `base64`, `mkdirs` | Write a file. `mode`: `overwrite`\|`append`\|`create`. |
+| `POST /api/fs/edit` | `path`, `edits:[{old,new,replace_all}]` | Search/replace edits. |
+| `GET /api/fs/list` | `path`, `recursive`, `depth` | Directory listing (dirs first). |
+| `GET /api/fs/stat` | `path` | File metadata. |
+
+### Processes
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/proc/start` | Start a background process. Body: `command`, `cwd`, `env`. Returns `{process:{id,…}}`. |
+| `GET /api/proc` | List processes. |
+| `GET /api/proc/{id}` | One process snapshot. |
+| `GET /api/proc/{id}/logs?since=N` | Output from offset `N`. Add `stream=true` for live output. |
+| `POST /api/proc/{id}/stop` | Stop (SIGTERM, then SIGKILL) the process group. |
+| `POST /api/proc/{id}/remove` | Forget a finished process. |
+
+### Approvals
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/approvals?status=pending` | List approvals (`pending`\|`completed`\|`denied`\|`expired`\|`failed`). |
+| `GET /api/approvals/{id}` | Poll one. On `completed`, `result` holds the command output. |
+| `POST /api/approvals/{id}/approve?by=name` | Approve and run. |
+| `POST /api/approvals/{id}/deny?by=name` | Deny. |
 
 ---
 
-## API Reference
+## Policy & privacy
 
-### Base URL
+Scout evaluates each command in order — **first match wins**:
 
+1. **Your rules** (from config), top to bottom.
+2. **Built-in dangerous guard** → `ask` (unless disabled).
+3. **Protected-path touch** → `ask` (or `deny` if the default is `deny`).
+4. **`policy.default`** → `allow` | `ask` | `deny`.
+
+### What the built-in guard catches
+
+Destructive/irreversible commands are routed to a human by default, including: `rm -rf`, `shred`, `find -delete`, `dd of=/dev/…`, `mkfs`, `fdisk`, `shutdown`/`reboot`, `systemctl stop/disable`, `sudo`, `chmod -R`, `userdel`/`passwd`, firewall flushes, `apt/yum/dnf remove`, `git push --force`, `git reset --hard`, `git clean -f`, `docker system prune`, `docker volume rm`, `kubectl delete`, `kubectl drain`, `helm uninstall`, `terraform destroy`, `curl … | bash`, fork bombs, and mass `kill`/`killall`.
+
+Ordinary work is **not** interrupted: `git push`/`pull`/`commit`, `docker build`/`run`, `kubectl apply`/`get`, package installs, builds, tests, and file writes all run immediately.
+
+### Shaping the policy
+
+Three example postures, all set in `scout.yaml`:
+
+```yaml
+# 1) Default (capable): run everything, pause the dangerous stuff.
+policy:
+  default: allow
+  use_builtin_dangerous: true
+
+# 2) Paranoid: approve every command.
+policy:
+  default: ask
+
+# 3) Locked allowlist: deny everything except explicit allows.
+policy:
+  default: deny
+  rules:
+    - { pattern: "^(ls|cat|rg|grep|git status|git log)\\b", action: allow, reason: "read-only" }
 ```
-http://YOUR_HOST:7711
+
+Add your own overrides (evaluated before the built-ins):
+
+```yaml
+policy:
+  rules:
+    - { pattern: "^rm -rf /tmp/scratch", action: allow, reason: "scratch is disposable" }
+    - { pattern: "\\bterraform\\b",       action: ask,   reason: "review all infra changes" }
+    - { pattern: "\\bdocker\\s+login\\b", action: deny,  reason: "no registry logins here" }
 ```
 
-All responses are JSON with `Content-Type: application/json`.
+`pattern` is a Go regular expression matched against the whole command string.
+
+### Protecting secrets
+
+`policy.protected_paths` are globs (with `**`) that escalate any command or file operation touching them — reads included. Defaults cover `.ssh`, `.aws`, `.gnupg`, kubeconfig, `*.pem`, `*.key`, `id_rsa*`, `.env*`, `/etc/shadow`, and sudoers. Add your own.
+
+### Sandboxing the filesystem
+
+`filesystem.roots` confines every file endpoint and working directory. Set it to your project directory to keep the agent out of the rest of the machine:
+
+```yaml
+filesystem:
+  roots: ["/home/me/projects"]
+```
 
 ---
 
-### `GET /api/health`
+## Configuration reference
 
-Health check. **No authentication required.**
+Config is optional — Scout runs with sensible defaults and zero config. Provide `scout.yaml` (auto-loaded from the working directory, or via `--config`), or use environment variables. Precedence: **defaults < file < env**.
 
+Generate a fully-commented starter:
+
+```bash
+scout --gen-config > scout.yaml
 ```
-GET /api/health
-```
 
-Response:
+| Section | Key | Default | Meaning |
+|---|---|---|---|
+| `server` | `bind` / `port` | `0.0.0.0` / `7711` | Listen address. |
+| | `tls_cert` / `tls_key` | — | Enable built-in HTTPS. |
+| `auth` | `tokens` | *(generated)* | Accepted bearer tokens. |
+| | `allowed_ips` | — | Restrict callers (IPs/CIDRs). |
+| `policy` | `default` | `allow` | Fallthrough: `allow`\|`ask`\|`deny`. |
+| | `use_builtin_dangerous` | `true` | Enable the dangerous-command guard. |
+| | `rules` | — | Your allow/ask/deny overrides. |
+| | `protected_paths` | *(secrets)* | Globs that escalate to approval. |
+| `filesystem` | `roots` | `["/"]` | Confine file ops + cwd. |
+| `limits` | `timeout` | `5m` | Per-command timeout. |
+| | `max_output_bytes` | `10MB` | Cap on buffered output. |
+| | `rate_limit` | `240` | Requests/minute (`0` = off). |
+| `approvals` | `wait_timeout` | `90s` | How long `wait=true` blocks. |
+| | `ttl` | `1h` | Pending approval lifetime. |
+| | `notify_webhook` | — | POSTed when a command needs approval. |
+| `audit` | `file` | — | JSONL audit path (`""` = memory only). |
+| `exec` | `shell` | `[/bin/bash,-lc]` | Command interpreter. |
+| | `working_dir` | `$HOME` | Default cwd. |
+
+**Environment overrides:** `SCOUT_TOKENS`, `SCOUT_PORT`, `SCOUT_BIND`, `SCOUT_POLICY_DEFAULT`, `SCOUT_ROOTS`, `SCOUT_WORKING_DIR`, `SCOUT_ALLOWED_IPS`, `SCOUT_AUDIT_FILE`, `SCOUT_NOTIFY_WEBHOOK`, `SCOUT_RATE_LIMIT`, `SCOUT_TIMEOUT`, `AUTH_TOKEN`.
+
+### Notifications
+
+Set `approvals.notify_webhook` (or `SCOUT_NOTIFY_WEBHOOK`) to get a JSON POST whenever a command is parked — wire it to Slack, Discord, or [ntfy](https://ntfy.sh):
+
 ```json
-{
-  "status": "ok",
-  "workspace": "/workspace",
-  "time": "2026-03-15T12:00:00Z"
-}
+{ "text": "Scout: command needs approval — recursive force delete (rm -rf)",
+  "id": "ap_…", "command": "rm -rf build", "reason": "…" }
 ```
 
 ---
 
-### `GET /api/exec`
+## Deployment
 
-Execute a read-only command. **Authentication required.**
+### Native (systemd)
 
-#### Parameters
+`sudo go run deploy/deploy.go` builds the binary, writes `/etc/scout/scout.yaml` with a random token, and installs a service running as your user (and optionally configures Caddy reverse proxy if `DOMAIN_NAME` is defined in `.env`). Then:
 
-| Param | Required | Description |
-|---|---|---|
-| `token` | Yes | Auth token (can also be sent as `Authorization: Bearer <token>` header) |
-| `cmd` | Yes | The command to execute (URL-encoded). Pipes (`\|`) are supported. |
-| `cwd` | No | Working directory, **relative to the workspace root**. E.g., `opentelemetry-collector-contrib`. If omitted, defaults to workspace root. |
-
-#### Example Request
-
-```
-GET /api/exec?token=abc123&cmd=ls%20-la&cwd=opentelemetry-collector-contrib
+```bash
+systemctl status scout
+journalctl -u scout -f
+sudo nano /etc/scout/scout.yaml && sudo systemctl restart scout
 ```
 
-#### Success Response
+Uninstall: `sudo systemctl disable --now scout && sudo rm /etc/systemd/system/scout.service /usr/local/bin/scout`.
 
-```json
-{
-  "ok": true,
-  "stdout": "total 1234\ndrwxr-xr-x  45 root root 4096 ...\n...",
-  "stderr": "",
-  "exit_code": 0,
-  "cwd": "/workspace/opentelemetry-collector-contrib",
-  "duration": "12.345ms",
-  "command": "ls -la"
-}
-```
+### Docker
 
-#### Error Response (validation failure)
+`docker compose up -d --build`. Configure via `.env` (token, `HOST_MOUNT`, kubeconfig, domain). The image ships bash, git, `jq`, `ripgrep`, the Docker CLI, and `kubectl`. Add TLS with `--profile tls`.
 
-```json
-{
-  "ok": false,
-  "error": "validation failed: command \"rm\" is not allowed"
-}
-```
+### TLS
 
-#### Error Response (command failed but was allowed)
-
-```json
-{
-  "ok": false,
-  "stdout": "",
-  "stderr": "cat: nosuchfile.go: No such file or directory",
-  "exit_code": 1,
-  "cwd": "/workspace/opentelemetry-collector-contrib",
-  "duration": "3.21ms",
-  "command": "cat nosuchfile.go"
-}
-```
+Either terminate TLS at the bundled Caddy proxy (set `DOMAIN_NAME`, run the `tls` profile — the Caddyfile is already tuned to flush streaming responses), or give Scout `tls_cert`/`tls_key` directly. Never expose a plaintext token to the public internet.
 
 ---
 
-### `GET /api/help`
-
-Returns the full list of allowed commands, git subcommands, blocked flags, and usage notes. **Authentication required.**
+## Architecture
 
 ```
-GET /api/help?token=abc123
+scout/
+├── main.go                     entrypoint, flags, graceful shutdown
+├── internal/
+│   ├── config/                 layered config (defaults < yaml < env)
+│   ├── yamllite/               tiny dependency-free YAML parser
+│   ├── policy/                 allow/ask/deny engine + dangerous denylist
+│   ├── executor/               bash -lc runner (buffered + NDJSON streaming)
+│   ├── fsops/                  read/write/edit/list/stat, root-confined
+│   ├── procs/                  background process manager
+│   ├── approval/               human-in-the-loop queue
+│   ├── audit/                  JSONL + in-memory audit log
+│   └── server/                 HTTP routing, middleware, handlers, dashboard
+├── deploy/                     systemd unit + installer
+├── Dockerfile · docker-compose.yaml · Caddyfile
+└── scout.example.yaml
 ```
 
----
-
-## Claude Integration Guide
-
-**This section is for Claude (the AI) — a reference on how to use Scout effectively via `web_fetch`.**
-
-### Setup
-
-When the user provides a Scout endpoint, Claude receives two things:
-
-1. **Base URL** — e.g., `http://1.2.3.4:7711`
-2. **Auth token** — e.g., `a1b2c3d4e5...`
-
-Claude uses the `web_fetch` tool to make GET requests:
-
-```
-web_fetch: http://BASE_URL/api/exec?token=TOKEN&cmd=URL_ENCODED_COMMAND&cwd=RELATIVE_PATH
-```
-
-### How to URL-Encode Commands
-
-Spaces become `%20`, pipes become `%20%7C%20`, quotes become `%27` (single) or `%22` (double).
-
-Examples:
-- `ls -la` → `ls%20-la`
-- `cat main.go` → `cat%20main.go`
-- `grep -rn 'func Coalesce' .` → `grep%20-rn%20%27func%20Coalesce%27%20.`
-- `rg TODO | head -20` → `rg%20TODO%20%7C%20head%20-20`
-
-### Step-by-Step: Exploring a New Issue
-
-Here is the recommended workflow when a user asks Claude to work on an issue in a project:
-
-**Step 1 — List available projects:**
-
-```
-GET /api/exec?token=TOKEN&cmd=ls
-```
-
-This lists all directories under `~/Projects` on the user's machine.
-
-**Step 2 — Navigate into the project and understand structure:**
-
-```
-GET /api/exec?token=TOKEN&cmd=ls%20-la&cwd=opentelemetry-collector-contrib
-GET /api/exec?token=TOKEN&cmd=tree%20-L%202%20-d&cwd=opentelemetry-collector-contrib/processor/transformprocessor
-```
-
-**Step 3 — Read specific files:**
-
-```
-GET /api/exec?token=TOKEN&cmd=cat%20config.go&cwd=opentelemetry-collector-contrib/processor/transformprocessor
-```
-
-For large files, use `head` first to check size:
-
-```
-GET /api/exec?token=TOKEN&cmd=wc%20-l%20config.go&cwd=opentelemetry-collector-contrib/processor/transformprocessor
-```
-
-Then read specific sections:
-
-```
-GET /api/exec?token=TOKEN&cmd=head%20-100%20config.go&cwd=...
-GET /api/exec?token=TOKEN&cmd=sed%20-n%20'50,120p'%20config.go&cwd=...
-```
-
-**Step 4 — Search for patterns across the project:**
-
-```
-GET /api/exec?token=TOKEN&cmd=rg%20'func%20Coalesce'%20--type%20go&cwd=opentelemetry-collector-contrib
-GET /api/exec?token=TOKEN&cmd=rg%20-l%20'transformprocessor'%20--type%20go&cwd=opentelemetry-collector-contrib
-GET /api/exec?token=TOKEN&cmd=grep%20-rn%20'Dropped'%20.&cwd=opentelemetry-collector-contrib/processor/tailsamplingprocessor
-```
-
-**Step 5 — Check git context:**
-
-```
-GET /api/exec?token=TOKEN&cmd=git%20log%20--oneline%20-20&cwd=opentelemetry-collector-contrib
-GET /api/exec?token=TOKEN&cmd=git%20branch%20-a&cwd=opentelemetry-collector-contrib
-GET /api/exec?token=TOKEN&cmd=git%20diff%20HEAD~3%20--%20processor/transformprocessor/&cwd=opentelemetry-collector-contrib
-GET /api/exec?token=TOKEN&cmd=git%20blame%20config.go&cwd=opentelemetry-collector-contrib/processor/transformprocessor
-```
-
-**Step 6 — Understand dependencies and structure:**
-
-```
-GET /api/exec?token=TOKEN&cmd=cat%20go.mod%20%7C%20grep%20opentelemetry&cwd=opentelemetry-collector-contrib
-GET /api/exec?token=TOKEN&cmd=find%20.%20-name%20'metadata.yaml'%20-path%20'*/transformprocessor/*'&cwd=opentelemetry-collector-contrib
-```
-
-### Response Parsing
-
-Every response is JSON. The key fields are:
-
-- **`ok`** (`bool`) — `true` if exit code was 0.
-- **`stdout`** (`string`) — command output. This is what you're usually interested in.
-- **`stderr`** (`string`) — error output, if any. Non-empty stderr doesn't always mean failure (e.g., `grep` with no matches returns exit code 1 but is not an error per se).
-- **`exit_code`** (`int`) — process exit code. 0 = success.
-- **`cwd`** (`string`) — the resolved absolute path the command ran in.
-- **`command`** (`string`) — the full command string that was executed (useful for debugging).
-
-### Tips for Claude
-
-1. **Start broad, then narrow.** `tree -L 2 -d` before `cat` individual files.
-2. **Use `rg` (ripgrep) for searching.** It's faster than `grep -r` and has better output. `rg 'pattern' --type go -l` to list files, `rg 'pattern' --type go -C 3` for context.
-3. **Use `wc -l` before `cat` on unknown files.** If a file is 5000 lines, read it in chunks with `sed -n '1,100p'` or `head -n 100`.
-4. **Use `fd` instead of `find` for simpler syntax.** `fd 'config\.go' processor/` finds all `config.go` files under `processor/`.
-5. **Chain commands with pipes.** `rg -l 'TODO' --type go | head -10` or `cat go.mod | grep opentelemetry`.
-6. **Use git context.** `git log --oneline -10 -- path/to/file` shows recent changes to a specific file. `git blame file.go` shows who changed each line and when.
-7. **The `cwd` parameter is your friend.** Instead of long paths in every command, set `cwd` to the deepest relevant directory.
-8. **Output is capped at 2 MB.** If you're reading huge generated files, use `head`/`tail`/`sed -n` to grab what you need.
-9. **Don't guess file contents.** Always verify by reading the actual file. One `web_fetch` call is cheaper than a wrong solution.
-10. **Use `jq` for JSON files.** `cat config.json | jq '.exporters'` to extract specific sections.
-
----
-
-## Command Reference
-
-### Navigation & Listing
-
-| Command | Description | Example |
-|---|---|---|
-| `ls` | List directory contents | `ls -la`, `ls -lh processor/` |
-| `pwd` | Print working directory | `pwd` |
-| `tree` | Show directory tree | `tree -L 3 -d`, `tree -I node_modules` |
-| `realpath` | Resolve file path | `realpath ../collector` |
-
-### File Reading
-
-| Command | Description | Example |
-|---|---|---|
-| `cat` | Print entire file | `cat main.go` |
-| `head` | Print first N lines | `head -50 main.go` |
-| `tail` | Print last N lines | `tail -30 main.go` |
-| `nl` | Print with line numbers | `nl -ba main.go` |
-| `tac` | Print file in reverse | `tac changelog.md` |
-| `bat` | Pretty print with syntax highlight | `bat config.go` |
-| `sed -n` | Print line range | `sed -n '100,200p' parser.go` |
-
-### Search
-
-| Command | Description | Example |
-|---|---|---|
-| `grep` | Search text in files | `grep -rn 'func Parse' .` |
-| `egrep` | Extended grep (regex) | `egrep -rn 'func (Parse\|Eval)' .` |
-| `rg` | Ripgrep (fast search) | `rg 'Coalesce' --type go -C 3` |
-| `rg -l` | List files with matches | `rg -l 'TODO' --type go` |
-| `find` | Find files by name/path | `find . -name '*.go' -path '*/ottl/*'` |
-| `fd` | Modern find alternative | `fd 'config\.go' processor/` |
-
-### Text Processing
-
-| Command | Description | Example |
-|---|---|---|
-| `sed` | Stream editor (read-only) | `sed -n '50,100p' file.go` |
-| `awk` | Pattern processing | `awk '/^func / {print NR": "$0}' main.go` |
-| `cut` | Extract columns | `cut -d: -f1 /etc/passwd` |
-| `tr` | Translate characters | `cat file \| tr '[:upper:]' '[:lower:]'` |
-| `sort` | Sort lines | `sort -u`, `sort -t, -k2 -n` |
-| `uniq` | Deduplicate lines | `sort file \| uniq -c \| sort -rn` |
-| `wc` | Count lines/words/chars | `wc -l *.go` |
-| `column` | Format into columns | `cat data.tsv \| column -t` |
-| `jq` | Process JSON | `cat config.json \| jq '.receivers'` |
-
-### File Information
-
-| Command | Description | Example |
-|---|---|---|
-| `file` | Identify file type | `file binary.exe` |
-| `stat` | File metadata | `stat main.go` |
-| `du` | Disk usage | `du -sh */`, `du -sh --max-depth=1` |
-| `md5sum` | MD5 hash | `md5sum config.go` |
-| `sha256sum` | SHA256 hash | `sha256sum config.go` |
-
-### Comparison
-
-| Command | Description | Example |
-|---|---|---|
-| `diff` | Compare files | `diff old.go new.go`, `diff -u a.go b.go` |
-| `comm` | Compare sorted files | `comm -12 list1.txt list2.txt` |
-
-### Git (Read-Only)
-
-| Subcommand | Description | Example |
-|---|---|---|
-| `git log` | Commit history | `git log --oneline -20`, `git log --oneline -- path/to/file` |
-| `git show` | Show commit details | `git show HEAD`, `git show abc123:path/file.go` |
-| `git diff` | Diff between refs | `git diff HEAD~5`, `git diff main..feature-branch -- dir/` |
-| `git blame` | Line-by-line authorship | `git blame config.go` |
-| `git status` | Working tree status | `git status --short` |
-| `git branch` | List branches | `git branch -a`, `git branch --contains abc123` |
-| `git tag` | List tags | `git tag -l 'v0.100*'` |
-| `git ls-files` | List tracked files | `git ls-files '*.go'` |
-| `git ls-tree` | List tree contents | `git ls-tree -r --name-only HEAD processor/` |
-| `git remote` | List remotes | `git remote -v` |
-| `git rev-parse` | Parse git refs | `git rev-parse HEAD` |
-| `git shortlog` | Summarize commits | `git shortlog -sn --no-merges` |
-| `git reflog` | Ref history | `git reflog -20` |
-| `git cat-file` | Inspect objects | `git cat-file -t HEAD` |
-| `git config` | Read config | `git config --list` |
-| `git describe` | Describe relative to tags | `git describe --tags` |
-| `git rev-list` | List commit objects | `git rev-list --count HEAD` |
-| `git stash` | List stashes | `git stash list` |
-
-### Utility
-
-| Command | Description | Example |
-|---|---|---|
-| `echo` | Print text | `echo hello` |
-| `dirname` | Extract directory path | `dirname /path/to/file.go` |
-| `basename` | Extract filename | `basename /path/to/file.go .go` |
-| `xargs` | Build commands from stdin | `rg -l 'TODO' \| xargs wc -l` |
-| `hexdump` | Hex dump | `hexdump -C binary.dat \| head -20` |
-| `xxd` | Hex dump / reverse | `xxd -l 64 binary.dat` |
-| `env` | Print environment (no args) | `env` |
-
----
-
-## Pipes
-
-Pipes are fully supported. Every command in the pipeline is independently validated against the allowlist.
-
-```
-rg -l 'OTTL' --type go | head -10
-cat go.mod | grep opentelemetry | sort
-find . -name '*.go' -path '*/ottl/*' | xargs wc -l | sort -rn | head -20
-git log --oneline -50 | grep -i 'coalesce'
-awk '/^func / {print $0}' parser.go | sort | nl
-```
-
-**What's blocked in pipes:**
-
-Every segment is validated independently. If even one command in the chain is not in the allowlist, the entire pipeline is rejected.
-
-```
-cat file.go | rm -rf /           → BLOCKED: "rm" is not allowed
-ls -la | bash                    → BLOCKED: "bash" is not allowed
-cat file.go | sed -i 's/a/b/' x → BLOCKED: sed -i is blocked
-find . -exec rm {} \;            → BLOCKED: -exec flag is blocked for find
-```
-
----
-
-## Security Model
-
-Scout implements defense-in-depth. Even if one layer fails, others prevent damage.
-
-### Layer 1: Read-Only Filesystem Mount
-
-Your `~/Projects` directory is mounted with Docker's `:ro` flag. The Linux kernel enforces this — no process inside the container can write to it regardless of what commands run.
-
-### Layer 2: Read-Only Container
-
-The `read_only: true` setting in docker-compose makes the entire container filesystem immutable. Combined with a `tmpfs` at `/tmp` for commands that need scratch space, this means even container-escape scenarios can't write anywhere persistent.
-
-### Layer 3: Command Allowlist
-
-A hardcoded Go `map[string]bool` of ~40 commands. If a command isn't in this map, it is rejected before any execution attempt. There is no way to add commands at runtime — you must edit `main.go` and rebuild.
-
-### Layer 4: Every Pipe Segment Validated
-
-The command `cat file.go | ls` validates **both** `cat` and `ls` independently. You can't sneak an unauthorized command into any position of a pipeline.
-
-### Layer 5: Dangerous Flag Blocking
-
-Even for allowed commands, certain flags are blocked:
-- `sed -i` / `sed --in-place` (writes to files)
-- `find -exec` / `find -execdir` / `find -delete` (arbitrary execution or deletion)
-- `git` write subcommands (`push`, `commit`, `checkout`, `reset`, `merge`, etc.)
-
-### Layer 6: xargs Target Validation
-
-If `xargs` is used, the target command it would execute is also validated against the allowlist. `rg -l pattern | xargs cat` works (both `rg` and `cat` are allowed), but `rg -l pattern | xargs rm` fails (`rm` is not allowed).
-
-### Layer 7: No Shell Execution
-
-Commands are **never** passed through `sh -c` or `bash -c`. The Go server tokenizes the command string itself (handling quotes, escapes, pipes) and calls `os/exec.Command(binary, args...)` directly. This means shell injection is structurally impossible — characters like `;`, `&&`, `||`, `$()`, backticks have no special meaning.
-
-### Layer 8: Shell Metacharacter Blocking (Defense-in-Depth)
-
-Even though no shell is used, arguments containing `$(` or backticks are rejected as an extra precaution.
-
-### Layer 9: Path Sandboxing
-
-The `cwd` parameter is resolved and validated to ensure it stays within the workspace root. Paths like `../../etc/` are rejected. Symlinks that point outside the workspace will resolve to their target, which is then checked against the workspace boundary.
-
-### Layer 10: Authentication
-
-Every request to `/api/exec` and `/api/help` requires a valid auth token (via `?token=` query parameter or `Authorization: Bearer` header). Token comparison uses constant-time comparison to prevent timing attacks.
-
-### Layer 11: Rate Limiting
-
-60 requests per minute, sliding window. Prevents runaway usage.
-
-### Layer 12: Output & Timeout Caps
-
-- Output is capped at 2 MB (excess is silently truncated with a marker).
-- Commands time out after 30 seconds.
-
-### Layer 13: Non-Root User
-
-The scout binary runs as user `scout` (UID 1000) inside the container, not as root.
-
-### Layer 14: No Privilege Escalation
-
-Docker's `no-new-privileges` security option prevents any process from gaining additional privileges via setuid/setgid binaries.
-
----
-
-## Real-World Workflow Examples
-
-### Investigating an OTTL Issue
-
-User says: *"I need to add a `Coalesce` converter to OTTL in opentelemetry-collector-contrib."*
-
-Claude's Scout calls:
-
-```
-# 1. Find the OTTL package
-cmd=fd%20'ottl'%20-t%20d%20--max-depth%203&cwd=opentelemetry-collector-contrib
-
-# 2. Understand OTTL structure
-cmd=tree%20-L%202&cwd=opentelemetry-collector-contrib/pkg/ottl
-
-# 3. See existing converters for the pattern to follow
-cmd=ls%20-la&cwd=opentelemetry-collector-contrib/pkg/ottl/ottlfuncs
-
-# 4. Read an existing converter as a template
-cmd=cat%20func_concat.go&cwd=opentelemetry-collector-contrib/pkg/ottl/ottlfuncs
-
-# 5. Check how converters are registered
-cmd=rg%20'createFactory'%20--type%20go%20-C%205&cwd=opentelemetry-collector-contrib/pkg/ottl/ottlfuncs
-
-# 6. Check the functions registry
-cmd=cat%20functions.go&cwd=opentelemetry-collector-contrib/pkg/ottl/ottlfuncs
-
-# 7. Read the grammar to understand the type system
-cmd=cat%20grammar.go&cwd=opentelemetry-collector-contrib/pkg/ottl
-
-# 8. Check test patterns
-cmd=fd%20'func_concat_test'%20--type%20f&cwd=opentelemetry-collector-contrib/pkg/ottl
-cmd=cat%20func_concat_test.go&cwd=opentelemetry-collector-contrib/pkg/ottl/ottlfuncs
-
-# 9. Check recent branch work
-cmd=git%20branch%20-a%20%7C%20grep%20coalesce&cwd=opentelemetry-collector-contrib
-
-# 10. Check .chloggen format
-cmd=ls%20.chloggen&cwd=opentelemetry-collector-contrib
-cmd=cat%20.chloggen/.tmpl.yaml&cwd=opentelemetry-collector-contrib
-```
-
-### Debugging a Processor Bug
-
-User says: *"The tailsamplingprocessor is logging a warning for dropped decisions."*
-
-```
-# 1. Find the processor
-cmd=tree%20-L%201&cwd=opentelemetry-collector-contrib/processor/tailsamplingprocessor
-
-# 2. Search for the warning message
-cmd=rg%20'dropped'%20--type%20go%20-i%20-C%205&cwd=opentelemetry-collector-contrib/processor/tailsamplingprocessor
-
-# 3. Read the sampling decision logic
-cmd=rg%20'NotSampled'%20--type%20go%20-C%2010&cwd=opentelemetry-collector-contrib/processor/tailsamplingprocessor
-
-# 4. Read the policy types
-cmd=rg%20'Dropped'%20--type%20go&cwd=opentelemetry-collector-contrib/processor/tailsamplingprocessor
-
-# 5. Check test file for patterns
-cmd=rg%20-l%20'TestSampling'%20--type%20go&cwd=opentelemetry-collector-contrib/processor/tailsamplingprocessor
-cmd=cat%20processor_test.go&cwd=opentelemetry-collector-contrib/processor/tailsamplingprocessor
-
-# 6. Check recent git history for this file
-cmd=git%20log%20--oneline%20-10%20--%20processor/tailsamplingprocessor/&cwd=opentelemetry-collector-contrib
-```
-
-### Reviewing a PR Before Submitting
-
-```
-# 1. See what branch we're on and uncommitted changes
-cmd=git%20status%20--short&cwd=opentelemetry-collector-contrib
-cmd=git%20branch%20--show-current&cwd=opentelemetry-collector-contrib
-
-# 2. See the full diff of what's being submitted
-cmd=git%20diff%20main&cwd=opentelemetry-collector-contrib
-
-# 3. Check for lint issues (just read what files changed)
-cmd=git%20diff%20main%20--name-only&cwd=opentelemetry-collector-contrib
-
-# 4. Read each changed file
-cmd=cat%20pkg/ottl/ottlfuncs/func_coalesce.go&cwd=opentelemetry-collector-contrib
-cmd=cat%20pkg/ottl/ottlfuncs/func_coalesce_test.go&cwd=opentelemetry-collector-contrib
-
-# 5. Make sure the changelog entry is correct
-cmd=fd%20'coalesce'%20.chloggen/&cwd=opentelemetry-collector-contrib
-```
-
-### Understanding Unfamiliar Code
-
-```
-# 1. Get a high-level map
-cmd=tree%20-L%201%20-d&cwd=opentelemetry-collector-contrib/exporter/awss3exporter
-
-# 2. Count lines per file to know what's big
-cmd=find%20.%20-name%20'*.go'%20-not%20-name%20'*_test.go'%20%7C%20xargs%20wc%20-l%20%7C%20sort%20-rn&cwd=opentelemetry-collector-contrib/exporter/awss3exporter
-
-# 3. Find all exported types
-cmd=rg%20'^(type|func) [A-Z]'%20--type%20go%20--no-filename&cwd=opentelemetry-collector-contrib/exporter/awss3exporter
-
-# 4. Read the README
-cmd=cat%20README.md&cwd=opentelemetry-collector-contrib/exporter/awss3exporter
-
-# 5. Read the config struct
-cmd=cat%20config.go&cwd=opentelemetry-collector-contrib/exporter/awss3exporter
-```
+Commands run through a real shell (`bash -lc`), each in its own process group so timeouts and stops clean up the whole tree. Streaming uses HTTP chunked transfer with `Flusher`. No `Math.random`/global state that would surprise you; IDs use `crypto/rand`. Nothing leaves the box except optional approval webhooks.
 
 ---
 
 ## Troubleshooting
 
-**"command X is not allowed"**
-The command isn't in the allowlist. Edit `allowedCommands` in `main.go` and rebuild with `docker compose up -d --build`.
+**`command denied by policy`** — a rule (or the `deny` default) blocked it. Check `GET /api/policy` and your `rules`.
 
-**"path X is outside workspace"**
-The `cwd` parameter resolved to a path outside your mounted workspace. Use paths relative to the workspace root.
+**`202 pending_approval` and it never resolves** — no human approved it. Open the dashboard (`/?token=…`) or `POST /api/approvals/{id}/approve`. Pending approvals expire after `approvals.ttl`.
 
-**Output is empty but `ok: true`**
-The command succeeded but produced no output. This is normal for commands like `grep` with no matches (though `grep` returns exit code 1 for no matches).
+**`path is outside the configured roots`** — the path is outside `filesystem.roots`. Widen the roots or use a path inside them.
 
-**"rate limit exceeded"**
-You've exceeded 60 requests/minute. Wait a moment and retry.
+**`server has no auth tokens configured`** — set `auth.tokens`, `AUTH_TOKEN`, or let Scout generate one (printed at startup).
 
-**"output truncated at 2MB"**
-The output exceeded the 2 MB cap. Use `head`, `tail`, or `sed -n` to read smaller chunks.
+**Streaming arrives all at once** — a proxy is buffering. Behind Caddy, the bundled config sets `flush_interval -1`; behind nginx, disable `proxy_buffering`.
 
-**Container can't see my files**
-Check that `HOST_PROJECTS` in `.env` points to the right directory on your host. Run `docker compose exec scout ls /workspace` to verify the mount.
+**Docker/kubectl "command not found" (container)** — they're in the image; make sure `/var/run/docker.sock` and your kubeconfig are mounted (see `docker-compose.yaml`).
 
-**Permission denied errors**
-The scout process runs as UID 1000. If your host files have restrictive permissions, the container user may not be able to read them. Ensure files are world-readable or owned by UID 1000.
-
----
-
-## Stopping Scout
-
-```bash
-docker compose down
-```
-
-To rebuild after editing `main.go`:
-
-```bash
-docker compose up -d --build
-```
+**Build fails fetching modules** — it shouldn't; Scout has zero dependencies. Ensure you're on Go 1.23+ and building from the repo root.
 
 ---
 
