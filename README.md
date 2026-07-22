@@ -48,7 +48,7 @@ Scout is powerful by design. Treat the token like a root password and read this 
 
 | Layer | What it does |
 |---|---|
-| **Auth token** | Every endpoint except `/api/health` needs a bearer token (constant-time compared). |
+| **Auth token** | Every single endpoint (including `/api/health` and the dashboard `/`) strictly needs a bearer token (constant-time compared). |
 | **Policy engine** | Default-allow, but a built-in denylist routes ~50 dangerous command patterns to human approval. Fully configurable. |
 | **Protected paths** | Touching `.ssh`, `.env`, `*.pem`, `/etc/shadow`, etc. escalates to approval — even for reads. |
 | **Filesystem roots** | Confine all file endpoints and working directories to specific directories. |
@@ -153,7 +153,7 @@ Pass a stable `session` string across exec calls to persist the working director
 ### Golden rules
 
 1. **You are driving a real machine.** Files you write persist. Commands you run have effects. Prefer reversible steps and check your work (`git status`, `git diff`, re-read files after writing).
-2. **Send the token on every call** as `?token=TOKEN` or header `Authorization: Bearer TOKEN`. Only `/api/health` is unauthenticated.
+2. **Send the token on every call** as `?token=TOKEN` or header `Authorization: Bearer TOKEN` (every single endpoint, including `/api/health` and the root dashboard `/`, is authenticated).
 3. **Prefer the file endpoints over shell redirection** for reading and writing — they avoid quoting bugs and stream large content.
 4. **When you get `202 pending_approval`, a human must approve.** Poll `GET /api/approvals/{id}` until `status != "pending"`. Don't retry the command — it's already queued.
 5. **Stream anything big.** For a 5,000-line file or a slow build, use `stream=true` instead of pulling it all at once.
@@ -284,13 +284,13 @@ You can paste this into an agent's system prompt:
 
 ## API reference
 
-All responses are JSON unless streaming. Auth is required on every endpoint except `/api/health`, via `?token=` or `Authorization: Bearer`.
+All responses are JSON unless streaming. Auth is required on every single endpoint, via `?token=` or `Authorization: Bearer`.
 
 ### Meta
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/health` | Liveness. No auth. |
+| `GET /api/health` | Liveness. |
 | `GET /api/help` | Machine-readable API guide (for agents). |
 | `GET /api/policy` | Current policy: default action, rule counts, protected paths, roots, shell. |
 | `GET /api/audit?n=100` | Recent audited operations. |
