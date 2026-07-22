@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -81,7 +83,11 @@ func main() {
 
 	// 4. Build Scout Binary
 	log.Println("▶ Building Scout binary...")
-	cmdBuild := exec.Command("go", "build", "-ldflags=-s -w", "-o", "/usr/local/bin/scout", ".")
+	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
+	if _, err := os.Stat(goBin); err != nil {
+		goBin = "go" // fallback to path lookup if GOROOT bin doesn't exist
+	}
+	cmdBuild := exec.Command(goBin, "build", "-ldflags=-s -w", "-o", "/usr/local/bin/scout", ".")
 	cmdBuild.Env = append(os.Environ(), "CGO_ENABLED=0")
 	cmdBuild.Stdout = os.Stdout
 	cmdBuild.Stderr = os.Stderr
@@ -154,8 +160,12 @@ func main() {
 
 	// 6. Install systemd service
 	log.Println("▶ Installing Scout systemd service...")
+	groupName := u.Username
+	if g, err := user.LookupGroupId(u.Gid); err == nil {
+		groupName = g.Name
+	}
 	serviceContent := strings.ReplaceAll(scoutServiceTemplate, "{{.User}}", u.Username)
-	serviceContent = strings.ReplaceAll(serviceContent, "{{.Group}}", u.Username) // Or look up group name, but username usually matches group on Ubuntu/Debian
+	serviceContent = strings.ReplaceAll(serviceContent, "{{.Group}}", groupName)
 	serviceContent = strings.ReplaceAll(serviceContent, "{{.Home}}", u.HomeDir)
 
 	servicePath := "/etc/systemd/system/scout.service"
@@ -250,6 +260,13 @@ func loadEnv() map[string]string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// Safely strip inline comments (e.g., "VAR=val # comment")
+		if idx := strings.Index(line, " #"); idx != -1 {
+			line = strings.TrimSpace(line[:idx])
+		} else if idx := strings.Index(line, "\t#"); idx != -1 {
+			line = strings.TrimSpace(line[:idx])
+		}
+
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
 			key := strings.TrimSpace(parts[0])
